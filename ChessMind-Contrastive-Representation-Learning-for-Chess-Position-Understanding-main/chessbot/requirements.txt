@@ -1,0 +1,3 @@
+# 本项目只依赖一个第三方库：规则裁判用 python-chess。
+# 搜索（src/search.py）与评估（src/evaluate.py）全部自己写，不引第三方引擎。
+chess>=1.10
