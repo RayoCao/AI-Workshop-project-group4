@@ -1,0 +1,50 @@
+# 三档搜索参数 + 评估权重（C 维护；改数字就能调难度，不用改代码）
+#
+# 三档共用 src/search.py 同一套代码，区别只在这四个开关：
+#   use_pruning    alpha-beta 剪枝      L1 关 → 等价 Minimax；L2/L3 开
+#   use_ordering   走法排序（MVV-LVA）  让剪枝更早发生，只影响快慢、不影响正确性
+#   use_cache      置换表（缓存算过的局面）L3 开
+#   use_quiescence 静态搜索（吃子延展）  L3 开，避免"换子换到一半就评估"
+#
+# node_limit 是"算多少个局面就收手"的硬上限：它保证同一台机器上两次跑结果完全一样
+# （论文 Q3 可复现），同时把最坏耗时压在 2 秒以内（论文 Q1）。
+# time_limit_ms 是安全阀：界面/批量脚本传了 time_limit 就按传的来。
+
+levels:
+  L1:
+    depth: 2
+    use_pruning: false
+    use_ordering: false
+    use_cache: false
+    use_quiescence: false
+    node_limit: 2500
+    time_limit_ms: 400
+
+  L2:
+    depth: 3
+    use_pruning: true
+    use_ordering: true
+    use_cache: false
+    use_quiescence: false
+    node_limit: 12000
+    time_limit_ms: 800
+
+  L3:
+    depth: 5
+    use_pruning: true
+    use_ordering: true
+    use_cache: true
+    use_quiescence: true
+    node_limit: 24000
+    time_limit_ms: 1900
+
+# 自创算法（D 的 mcts.py）；engine.py 只是按名字把它装进同一套 choose() 接口
+mcts:
+  simulations: 2000
+  time_limit_ms: 1500
+  rollout_depth: 20
+
+# 评估权重（D 的 evaluate.py 读这里；C 只是把值放好，不实现评估）
+evaluation:
+  material: {P: 100, N: 320, B: 330, R: 500, Q: 900}
+  weights: {material: 1.0, pst: 0.3, mobility: 0.1, king_safety: 0.2}
