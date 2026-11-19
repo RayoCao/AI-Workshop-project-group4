@@ -81,7 +81,7 @@ def test_illegal_human_move_does_not_change_position():
 def test_fen_and_legal_highlights():
     g = Game()
     assert g.moves_from("e2") == ["e3", "e4"]
-    assert g.get_board()[1][4] == "bP"
+    assert g.get_board()[0][1][4] == "bP"
 
 
 def test_engine_turn_uses_copy_and_updates_stats():
