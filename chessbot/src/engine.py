@@ -61,7 +61,7 @@ def _load_evaluator():
         mod = importer("evaluate")
         if mod is None:
             continue
-        for attr in ("evaluate", "evaluate_board", "score"):
+        for attr in ("evaluate_white", "evaluate", "evaluate_board", "score"):
             fn = getattr(mod, attr, None)
             if callable(fn):
                 return fn, "src.evaluate.%s" % attr
