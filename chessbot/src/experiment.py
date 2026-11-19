@@ -30,6 +30,15 @@ CSV_FIELDS = (
     "plies", "nodes_w", "nodes_b", "ms_w", "ms_b", "seed", "error",
 )
 
+# Keep the official 14-column CSV unchanged. A companion CSV carries the
+# separate termination reason already returned by GameController.get_summary().
+# Old results without a companion record are classified as "unknown", NEVER
+# retroactively guessed to be a rules draw or a ply-limit truncation.
+TERMINATION_FIELDS = (
+    "group", "seed", "game_id", "result", "plies", "termination",
+)
+KNOWN_TERMINATIONS = {"rules", "ply_limit", "engine_error"}
+
 GROUP_PAIRS = {
     "G1": ("L1", "L2"),
     "G2": ("L2", "L3"),
@@ -180,6 +189,9 @@ class ExperimentRunner:
         self.games = games
         self.seed = seed
         self.output_csv = Path(output_csv)
+        self.termination_csv = self.output_csv.with_name(
+            self.output_csv.stem + "_termination.csv"
+        )
         self.max_plies = max_plies
         self.time_limit = time_limit
         self.timeout_seconds = timeout_seconds
@@ -220,6 +232,61 @@ class ExperimentRunner:
                 existing[game_id] = row
         return existing
 
+    def _read_termination_audit(self, existing: dict[int, dict]) -> dict[int, str]:
+        """Read companion rows for this batch, validating the matching result.
+
+        A pre-existing main CSV without audit data is supported for resume, but
+        those games have *unknown* termination. Never infer the cause from 200
+        plies (a rules result can legitimately happen at that same ply count).
+        """
+        if (not self.termination_csv.exists() or
+                self.termination_csv.stat().st_size == 0):
+            return {}
+        found: dict[int, str] = {}
+        with self.termination_csv.open("r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            if tuple(reader.fieldnames or ()) != TERMINATION_FIELDS:
+                raise ValueError("termination audit CSV header is incompatible")
+            for row in reader:
+                if row["group"] != self.group or row["seed"] != str(self.seed):
+                    continue
+                try:
+                    game_id = int(row["game_id"])
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("termination audit contains invalid game_id") from exc
+                if game_id in found:
+                    raise ValueError("duplicate termination audit record")
+                main = existing.get(game_id)
+                if main is None:
+                    raise ValueError("orphan termination audit record: no matching result row")
+                if row["result"] != main["result"] or row["plies"] != main["plies"]:
+                    raise ValueError("termination audit disagrees with results CSV")
+                termination = row["termination"]
+                if termination not in KNOWN_TERMINATIONS | {"unknown"}:
+                    raise ValueError("invalid termination audit value")
+                found[game_id] = termination
+        return found
+
+    def _append_termination(self, row: dict, reason: str) -> None:
+        """Append a separate audit row without changing the 14-column format."""
+        audit = {
+            "group": row["group"],
+            "seed": row["seed"],
+            "game_id": row["game_id"],
+            "result": row["result"],
+            "plies": row["plies"],
+            "termination": reason,
+        }
+        self.termination_csv.parent.mkdir(parents=True, exist_ok=True)
+        new_file = (not self.termination_csv.exists() or
+                    self.termination_csv.stat().st_size == 0)
+        with self.termination_csv.open("a", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=TERMINATION_FIELDS)
+            if new_file:
+                writer.writeheader()
+            writer.writerow(audit)
+            f.flush()
+
     def _run_one(self, game_id: int, opening_fen: str) -> dict:
         white, black = self._pair(game_id)
         # C/D may use global random: seed separately for each game, then restore
@@ -249,7 +316,14 @@ class ExperimentRunner:
         black_moves = (m for m in records if m["color"] == "black")
         depth_w = max((int(m["depth"]) for m in white_moves), default=0)
         depth_b = max((int(m["depth"]) for m in black_moves), default=0)
+        # An internal key only: removed before writing the official CSV.
+        # Fake/custom game factories that do not report termination remain
+        # explicitly unclassified rather than being assumed to be rules draws.
+        termination = result.get("termination")
+        if termination not in KNOWN_TERMINATIONS:
+            termination = "unknown"
         return {
+            "_termination": termination,
             "game_id": game_id,
             "group": self.group,
             "white": white,
@@ -280,6 +354,7 @@ class ExperimentRunner:
         existing = self._read_existing()
         if existing and not resume:
             raise ValueError("Matching group/seed rows already exist; use resume=True")
+        terminations = self._read_termination_audit(existing)
 
         to_run = [i for i in range(1, self.games + 1) if i not in existing]
         positions = self._positions()
@@ -293,6 +368,7 @@ class ExperimentRunner:
             if row["result"] not in counts:
                 raise ValueError("Existing CSV contains an invalid result")
             counts[row["result"]] += 1
+        processed = dict(existing)
         new_games = 0
         stopped = False
         for game_id in to_run:
@@ -301,6 +377,7 @@ class ExperimentRunner:
                 break
             opening_fen = positions[((game_id - 1) // 2) % len(positions)]
             row = self._run_one(game_id, opening_fen)
+            termination = row.pop("_termination")
             self.output_csv.parent.mkdir(parents=True, exist_ok=True)
             is_new = (not self.output_csv.exists() or
                       self.output_csv.stat().st_size == 0)
@@ -310,6 +387,12 @@ class ExperimentRunner:
                     writer.writeheader()
                 writer.writerow(row)
                 f.flush()  # Save this game even if next game is cancelled.
+            # Two separate files are not an atomic transaction. If interrupted
+            # between writes, resume keeps the main result and reports the
+            # missing audit as unknown rather than misclassifying the draw.
+            self._append_termination(row, termination)
+            terminations[game_id] = termination
+            processed[game_id] = row
             counts[row["result"]] += 1
             new_games += 1
             if on_progress is not None:
@@ -318,7 +401,13 @@ class ExperimentRunner:
                     "total": self.games,
                     "white_wins": counts["1-0"],
                     "black_wins": counts["0-1"],
-                    "draws": counts["1/2-1/2"],
+                    "draws": counts["1/2-1/2"],  # legacy total, includes capped games
+                    "rule_draws": sum(
+                        (row0["result"] == "1/2-1/2" and
+                         terminations.get(gid) == "rules")
+                        for gid, row0 in processed.items()
+                    ),
+                    "ply_limits": sum(t == "ply_limit" for t in terminations.values()),
                     "group": self.group,
                     "game_id": game_id,
                     "record": dict(row),
@@ -326,6 +415,18 @@ class ExperimentRunner:
                     "stopped": False,
                 })
 
+        rule_draws = sum(
+            row["result"] == "1/2-1/2" and terminations.get(gid) == "rules"
+            for gid, row in processed.items()
+        )
+        ply_limits = sum(
+            terminations.get(gid) == "ply_limit" for gid in processed
+        )
+        unknown_draws = sum(
+            row["result"] == "1/2-1/2" and
+            terminations.get(gid, "unknown") == "unknown"
+            for gid, row in processed.items()
+        )
         return {
             "group": self.group,
             "seed": self.seed,
@@ -335,9 +436,16 @@ class ExperimentRunner:
             "resumed_games": len(existing),
             "white_wins": counts["1-0"],
             "black_wins": counts["0-1"],
-            "draws": counts["1/2-1/2"],
+            "draws": counts["1/2-1/2"],  # backward-compatible raw result count
+            "rule_draws": rule_draws,
+            "ply_limits": ply_limits,
+            "unknown_draws": unknown_draws,
+            "engine_errors": sum(
+                terminations.get(gid) == "engine_error" for gid in processed
+            ),
             "stopped": stopped,
             "output_csv": str(self.output_csv),
+            "termination_csv": str(self.termination_csv),
         }
 
 

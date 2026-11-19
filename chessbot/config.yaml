@@ -43,8 +43,9 @@ mcts:
   simulations: 2000
   time_limit_ms: 1500
   rollout_depth: 20
+  c: 1.41
 
-# 评估权重（D 的 evaluate.py 读这里；C 只是把值放好，不实现评估）
+# D 的评估权重只以 configs/eval_weights.json 为实际运行配置。
+# 此节保留为文档和实验参数摘要，不由 evaluate.py 静默读取；必须与 JSON 同步。
 evaluation:
-  material: {P: 100, N: 320, B: 330, R: 500, Q: 900}
-  weights: {material: 1.0, pst: 0.3, mobility: 0.1, king_safety: 0.2}
+  weights: {material: 1.0, pst: 1.0, mobility: 2.0}

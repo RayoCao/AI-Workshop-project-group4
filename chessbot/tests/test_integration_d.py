@@ -7,6 +7,7 @@ from src.engine import build_engine
 from src.evaluate import evaluate, evaluate_white, evaluate_breakdown, load_weights
 from src.mcts import MCTS, Node, _backpropagate, choose_move
 from src.experiment import ExperimentRunner, _build_default_engine
+from src.config_loader import load_config
 
 
 def test_d_evaluation_preserves_original_side_to_move_contract():
@@ -77,6 +78,30 @@ def test_g5_position_uses_d_without_score_reversal():
     engine = _build_default_engine("POSITION")
     b = chess.Board("4k3/8/8/8/8/8/3Q4/4K3 b - - 0 1")
     assert engine.evaluator(b) > 0
+
+
+def test_evaluate_terminal_and_white_perspective_scores():
+    mate = chess.Board("7k/6Q1/6K1/8/8/8/8/8 b - - 0 1")
+    assert mate.is_checkmate()
+    assert evaluate(mate) == -100000
+    draw = chess.Board("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1")
+    assert draw.is_stalemate()
+    assert evaluate(draw) == 0
+
+
+def test_mcts_config_and_evaluation_config_are_explicit():
+    cfg = load_config()
+    assert cfg["mcts"]["c"] == 1.41
+    assert load_weights() == {"material": 1.0, "pst": 1.0, "mobility": 2.0}
+
+
+def test_g3_builds_real_mcts_and_g5_builds_real_evaluation():
+    mcts = build_engine("MCTS")
+    assert mcts.name == "MCTS"
+    assert mcts._impl is not None
+    position = _build_default_engine("POSITION")
+    assert position.evaluator.__module__.endswith("experiment")
+    assert position.evaluator(chess.Board("4k3/8/8/8/8/8/3Q4/4K3 b - - 0 1")) > 0
 
 
 @pytest.mark.parametrize("group", ["G3", "G5"])

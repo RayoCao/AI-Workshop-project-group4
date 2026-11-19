@@ -148,14 +148,13 @@ def evaluate(board: chess.Board) -> int:
     单位：厘兵，整数。
     """
     try:
-        safe_board = board.copy(stack=False)
+        safe_board = board.copy(stack=True)
         if safe_board.is_checkmate():
             return -MATE_SCORE
-        if safe_board.is_stalemate() or safe_board.is_insufficient_material():
+        if safe_board.is_game_over(claim_draw=True):
             return 0
         breakdown = evaluate_breakdown(safe_board)
         return int(breakdown["total"])
     except Exception:
         return 0
-
 
