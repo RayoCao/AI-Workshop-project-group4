@@ -47,7 +47,7 @@ class _Ctx:
     """一次搜索的公共上下文：预算、置换表、评估函数。"""
 
     __slots__ = ("nodes", "qnodes", "t0", "time_limit", "node_limit",
-                 "tt", "ev", "cfg", "use_cache", "use_quiescence", "use_ordering")
+                 "tt", "ev", "cfg", "use_cache", "use_quiescence", "use_ordering", "q_depth")
 
     def __init__(self, cfg, ev, time_limit, node_limit):
         self.nodes = 0
@@ -61,6 +61,8 @@ class _Ctx:
         self.use_cache = bool(cfg.get("use_cache", False))
         self.use_quiescence = bool(cfg.get("use_quiescence", False))
         self.use_ordering = bool(cfg.get("use_ordering", False))
+        # 吃子延展最多再往下几层：评估贵时调小它，把节点预算让给主搜索（默认 4）
+        self.q_depth = int(cfg.get("q_depth", 4))
 
     def check_budget(self):
         if self.nodes >= self.node_limit:
@@ -260,7 +262,7 @@ def _quiescence(board, alpha, beta, ctx, ply, qdepth=0):
         moves = list(board.legal_moves)
         if not moves:
             return -MATE + ply
-        if qdepth >= 6:
+        if qdepth >= ctx.q_depth + 2:
             return _eval_for_side(board, ctx)
         best = -INF
         for m in _ordered_moves(board, moves):
@@ -284,7 +286,7 @@ def _quiescence(board, alpha, beta, ctx, ply, qdepth=0):
     if stand > alpha:
         alpha = stand
 
-    if qdepth >= 4:
+    if qdepth >= ctx.q_depth:
         return stand
 
     moves = _captures_only(board, list(board.legal_moves))

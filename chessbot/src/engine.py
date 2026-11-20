@@ -55,17 +55,106 @@ def normalize_level(name):
     return key
 
 
-def _load_evaluator():
-    """D 的评估函数；取不到就用兜底实现，并记下来源（论文/调试要看）。"""
+def _has_claimable_draw(board):
+    """History-dependent rules must not be hidden by position-only caching.
+
+    Threefold claim can first arise after reversible moves; the small
+    halfmove-clock guard avoids repeated draw scans in simple openings.
+    """
+    return getattr(board, "halfmove_clock", 0) >= 7 and board.can_claim_draw()
+
+
+def memoize_evaluator(fn, max_entries=300000):
+    """给评估函数加一层按局面的缓存（C 的适配层，不改 D 的实现）。
+
+    为什么需要：D 的 evaluate_white -> evaluate -> evaluate_breakdown(weights=None)
+    每次都会重新 open+json.load 一遍权重文件，且 mobility 项要做两次合法走法生成，
+    单次约 0.3-0.6 ms；搜索一秒要调几千次。同一局面在迭代加深/置换里会重复出现，
+    缓存命中时只需一次字典查找（约 1 µs）。
+
+    安全性：D 的评估不修改棋盘、不随机、纯函数，缓存结果不会过期。
+    """
+    cache = {}
+
+    def cached(board):
+        try:
+            key = board._transposition_key()
+        except AttributeError:
+            key = board.fen()
+        # D's evaluator treats claimable draws as zero. A transposition key
+        # omits halfmove/repetition history, so never reuse a cached static
+        # value when this history-dependent draw is claimable.
+        if _has_claimable_draw(board):
+            return fn(board)
+        value = cache.get(key)
+        if value is None:
+            value = fn(board)
+            if len(cache) >= max_entries:
+                cache.clear()
+            cache[key] = value
+        return value
+
+    cached.__wrapped__ = fn
+    cached.cache_clear = cache.clear
+    return cached
+
+
+def _load_evaluator(use_cache=True, fast_path=True):
+    """D 的评估函数；取不到就用兜底实现，并记下来源（论文/调试要看）。
+
+    两条路径，**语义完全一致**（等价性有测试守着）：
+      · 标准路径：直接用 D 的 `evaluate_white(board)`；
+      · 快速路径（默认）：`evaluate_breakdown(board, 预载权重)` + 手工转白方视角。
+        区别只是省掉"每次评估都重新 open+json.load 权重文件"这一步——实测占单次评估
+        约 30%，是 `evaluate_white -> evaluate -> evaluate_breakdown(weights=None)` 的浪费。
+        想严格只走 evaluate_white，把 config.yaml 的 `evaluation.fast_path` 设成 false。
+    """
     for importer in (_import_from_package, _import_absolute):
         mod = importer("evaluate")
         if mod is None:
             continue
-        for attr in ("evaluate_white", "evaluate", "evaluate_board", "score"):
-            fn = getattr(mod, attr, None)
-            if callable(fn):
-                return fn, "src.evaluate.%s" % attr
-    return material_eval, "fallback(material)  ← D 的 evaluate.py 交付后自动替换"
+
+        white = getattr(mod, "evaluate_white", None)
+        breakdown = getattr(mod, "evaluate_breakdown", None)
+        load_weights = getattr(mod, "load_weights", None)
+        mate = getattr(mod, "MATE_SCORE", 100000)
+
+        fn, source = None, ""
+        if fast_path and callable(breakdown) and callable(load_weights):
+            try:
+                weights = load_weights()
+            except Exception:
+                weights = None
+            if weights is not None:
+                def fast(board, _bd=breakdown, _w=weights, _mate=mate):
+                    # 终局口径与 D 的 evaluate() 一致，再统一转成白方视角
+                    if board.is_checkmate():
+                        score = -_mate
+                    elif (board.is_stalemate() or board.is_insufficient_material()
+                          or _has_claimable_draw(board)):
+                        score = 0
+                    else:
+                        score = int(_bd(board, _w)["total"])
+                    return score if board.turn else -score
+
+                fn, source = fast, ("src.evaluate.evaluate_white"
+                                    "（快速路径：evaluate_breakdown + 预载权重，"
+                                    "与 evaluate_white 逐分数等价）")
+        if fn is None and callable(white):
+            fn, source = white, "src.evaluate.evaluate_white"
+        if fn is None:
+            for attr in ("evaluate", "evaluate_board", "score"):
+                candidate = getattr(mod, attr, None)
+                if callable(candidate):
+                    fn, source = candidate, "src.evaluate.%s" % attr
+                    break
+        if fn is None:
+            continue
+        if use_cache:
+            fn = memoize_evaluator(fn)
+            source += " + 缓存"
+        return fn, source
+    return material_eval, "fallback(material)  ← 没找到 src/evaluate.py"
 
 
 def _load_mcts():
@@ -195,6 +284,15 @@ def _check_contract(result, name):
     return result
 
 
+def _evaluator_options(cfg):
+    """从 config.yaml 的 evaluation 段读适配层开关（缺省：缓存开、快速路径开）。"""
+    section = (cfg or {}).get("evaluation") or {}
+    return {
+        "use_cache": bool(section.get("use_cache", True)),
+        "fast_path": bool(section.get("fast_path", True)),
+    }
+
+
 def build_engine(level, config_path=None, cfg=None, evaluator=None):
     """按难度名造一个引擎。cfg 不传就从 config.yaml 读。"""
     name = normalize_level(level)
@@ -209,14 +307,17 @@ def build_engine(level, config_path=None, cfg=None, evaluator=None):
                 "先用 build_engine('L3') 占位，等 D 交文件后再跑 G3 组实验。")
         return MCTSEngine(mod, cfg.get("mcts") or {})
 
-    ev, source = (evaluator, "injected") if evaluator is not None else _load_evaluator()
+    if evaluator is not None:
+        ev, source = evaluator, "injected"
+    else:
+        ev, source = _load_evaluator(**_evaluator_options(cfg))
     return Engine(name, cfg, evaluator=ev, evaluator_source=source, config_path=config_path)
 
 
 def build_engines(config_path=None):
     """一次造三档，给自检脚本和实验页用。MCTS 单独按需造（D 可能还没交付）。"""
     cfg = load_config(config_path or _default_config_path())
-    ev, source = _load_evaluator()
+    ev, source = _load_evaluator(**_evaluator_options(cfg))
     return {name: Engine(name, cfg, ev, source, config_path) for name in ("L1", "L2", "L3")}
 
 

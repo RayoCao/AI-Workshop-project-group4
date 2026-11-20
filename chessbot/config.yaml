@@ -1,14 +1,16 @@
-# 三档搜索参数 + 评估权重（C 维护；改数字就能调难度，不用改代码）
+# 三档搜索参数 + 评估适配开关（C 维护；改数字就能调难度，不用改代码）
 #
-# 三档共用 src/search.py 同一套代码，区别只在这四个开关：
+# 三档共用 src/search.py 同一套代码，区别只在这几个开关：
 #   use_pruning    alpha-beta 剪枝      L1 关 → 等价 Minimax；L2/L3 开
 #   use_ordering   走法排序（MVV-LVA）  让剪枝更早发生，只影响快慢、不影响正确性
 #   use_cache      置换表（缓存算过的局面）L3 开
 #   use_quiescence 静态搜索（吃子延展）  L3 开，避免"换子换到一半就评估"
+#   q_depth        吃子延展最多再往下几层 L3 = 2（评估贵时调小，把节点预算让给主搜索）
 #
-# node_limit 是"算多少个局面就收手"的硬上限：它保证同一台机器上两次跑结果完全一样
-# （论文 Q3 可复现），同时把最坏耗时压在 2 秒以内（论文 Q1）。
-# time_limit_ms 是安全阀：界面/批量脚本传了 time_limit 就按传的来。
+# 预算怎么定的（2026-11-20 用 D 的 evaluate 实测标定：6 个固定局面、冷启动）
+#   node_limit   是主约束：算够这么多局面就收手，与机器快慢无关 → 两次跑结果完全一致（论文 Q3）
+#   time_limit_ms 是安全阀：只在更慢的机器上先触发，用来守住论文 Q1 的 2 秒红线
+#   实测最慢一步：L1 618ms / L2 574ms / L3 1545ms（都没有触到时间阀）
 
 levels:
   L1:
@@ -18,7 +20,7 @@ levels:
     use_cache: false
     use_quiescence: false
     node_limit: 2500
-    time_limit_ms: 400
+    time_limit_ms: 1200
 
   L2:
     depth: 3
@@ -26,8 +28,8 @@ levels:
     use_ordering: true
     use_cache: false
     use_quiescence: false
-    node_limit: 12000
-    time_limit_ms: 800
+    node_limit: 4000
+    time_limit_ms: 1200
 
   L3:
     depth: 5
@@ -35,8 +37,19 @@ levels:
     use_ordering: true
     use_cache: true
     use_quiescence: true
-    node_limit: 24000
+    q_depth: 2
+    node_limit: 10000
     time_limit_ms: 1900
+
+# 评估适配层（C 的 engine.py 读这里，不改 D 的 evaluate.py）
+#   use_cache  按局面缓存评估结果（同一局面只算一次）
+#   fast_path  true  = 用 evaluate_breakdown + 预载权重（省掉每次读 JSON，快约 2.3 倍，结果与 evaluate_white 等价）
+#              false = 严格只调 evaluate_white（最慢，但字面上就是 D 的那个函数）
+evaluation:
+  fast_path: true
+  use_cache: true
+  # D 的 eval_weights.json 是唯一生效来源；此处仅给团队展示相同数值。
+  weights: {material: 1.0, pst: 1.0, mobility: 2.0}
 
 # 自创算法（D 的 mcts.py）；engine.py 只是按名字把它装进同一套 choose() 接口
 mcts:
@@ -44,8 +57,3 @@ mcts:
   time_limit_ms: 1500
   rollout_depth: 20
   c: 1.41
-
-# D 的评估权重只以 configs/eval_weights.json 为实际运行配置。
-# 此节保留为文档和实验参数摘要，不由 evaluate.py 静默读取；必须与 JSON 同步。
-evaluation:
-  weights: {material: 1.0, pst: 1.0, mobility: 2.0}

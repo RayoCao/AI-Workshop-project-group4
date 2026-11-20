@@ -1,0 +1,5 @@
+﻿position,depth,nodes_no_pruning,nodes_pruning,saved_pct,ms_no_pruning,ms_pruning,move,score,same_answer
+开局,3,9762,3853,60.5,1365,48,d2d4,36,是
+意大利,3,39538,5163,86.9,5777,89,c4b5,166,是
+Kiwipete,3,102084,17017,83.3,17307,254,e2a6,426,是
+封闭兵型,3,49295,3824,92.2,7141,59,f1b5,348,是
